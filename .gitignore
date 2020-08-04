@@ -1,0 +1,5 @@
+__pycache__
+*.pyc
+my_new_bleurt_checkpoint/
+*.tfrecord
+bleurt/zh_checkpoint/multi_cased_L-12_H-768_A-12/
