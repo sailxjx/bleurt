@@ -10,6 +10,7 @@ from transformers import AutoTokenizer, TFAutoModelWithLMHead
 import numpy as np
 from joblib import Parallel, delayed
 import multiprocessing
+import traceback, sys
 
 import configparser
 from aliyunsdkcore.client import AcsClient
@@ -44,7 +45,7 @@ def cut_sentences(text, min_len=3):
     Cut sentences by their length and punctuation, remove all spaces.
     """
     text = text.replace(" ", "")
-    corpus = re.split("[\,\.\?，。？\n]", text)
+    corpus = re.split(r"[\,\.\?，。？\n]", text)
     corpus = list(filter(lambda x: len(x) >= min_len, corpus))
     return corpus
 
@@ -145,7 +146,7 @@ class BackTranslation:
             translated = response_json["Data"]["Translated"]
             return translated
         except:
-            print(response_json)
+            logger.error("Response error %s", response)
             raise Exception("Response error")
 
 
@@ -212,8 +213,14 @@ def make_candidates(references):
 
     # Back translation (bt)
     logger.info("Apply back translation ...")
-    bt = parallelize(
-        references, lambda refs: BackTranslation().back_translation(refs))
+    try:
+        bt = parallelize(
+            references, lambda refs: BackTranslation().back_translation(refs))
+    except:
+        # Error in back translation
+        traceback.print_exc(file=sys.stdout)
+        return refs, candidates, scores
+    
     # Drop samples where refs and back translationed excactly same
     df_bt = pd.DataFrame({
         "refs": references,
@@ -319,7 +326,7 @@ def main():
     while True:
         checkpoint = run_epoch("./webtext2019zh/web_text_zh_train.json",
                                checkpoint = checkpoint,
-                               batch_size = 1e4)
+                               batch_size = 100)
         if checkpoint is None:
             break
     logger.info("Finish")
