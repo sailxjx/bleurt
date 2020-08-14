@@ -4,7 +4,39 @@ import re
 import random
 import math
 import tensorflow as tf
+import logging
+from os import path
 from transformers import AutoTokenizer, TFAutoModelWithLMHead
+import numpy as np
+from joblib import Parallel, delayed
+import multiprocessing
+
+import configparser
+from aliyunsdkcore.client import AcsClient
+from aliyunsdkcore.acs_exception.exceptions import ClientException
+from aliyunsdkcore.acs_exception.exceptions import ServerException
+from aliyunsdkalimt.request.v20181012.TranslateGeneralRequest import TranslateGeneralRequest
+
+
+logger = logging.getLogger()
+handler = logging.StreamHandler()
+formatter = logging.Formatter('%(asctime)s %(levelname)-8s %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+logger.setLevel(logging.INFO)
+
+logger.info("Loading model ...")
+tokenizer = AutoTokenizer.from_pretrained(
+    "/home/admin/workspace/model/transformers/bert-base-multilingual-cased")
+model = TFAutoModelWithLMHead.from_pretrained(
+    "/home/admin/workspace/model/transformers/bert-base-multilingual-cased")
+
+config = configparser.ConfigParser()
+config.read("/home/admin/workspace/.secret")
+
+client = AcsClient(config["account xjx"]["access_key"],
+                   config["account xjx"]["access_secret"],
+                   'cn-hangzhou')
 
 
 def cut_sentences(text, min_len=3):
@@ -53,12 +85,6 @@ def mask_replacing2(s):
     return pd.Series([s, length / seq_len], index=["masked", "masked_rate"])
 
 
-tokenizer = AutoTokenizer.from_pretrained(
-    "/home/admin/workspace/model/transformers/bert-base-multilingual-cased")
-model = TFAutoModelWithLMHead.from_pretrained(
-    "/home/admin/workspace/model/transformers/bert-base-multilingual-cased")
-
-
 def mask_filling(text):
     encoded_input = tokenizer(text, return_tensors='tf')
     [predictions] = model(encoded_input)
@@ -66,25 +92,6 @@ def mask_filling(text):
     predicted_index = tf.argmax(predictions[0], axis=1)
     predicted_token = tokenizer.convert_ids_to_tokens(predicted_index)
     return "".join(predicted_token[1:-1])
-
-
-import configparser
-from aliyunsdkcore.client import AcsClient
-from aliyunsdkcore.acs_exception.exceptions import ClientException
-from aliyunsdkcore.acs_exception.exceptions import ServerException
-from aliyunsdkalimt.request.v20181012.TranslateGeneralRequest import TranslateGeneralRequest
-
-config = configparser.ConfigParser()
-config.read("/home/admin/workspace/.secret")
-
-client = AcsClient(config["account xjx"]["access_key"],
-                   config["account xjx"]["access_secret"],
-                   'cn-hangzhou')
-
-import numpy as np
-import json
-from joblib import Parallel, delayed
-import multiprocessing
 
 
 class BackTranslation:
@@ -165,31 +172,13 @@ def word_dropping(text):
     return pd.Series([dropped, dropped_rate], index=["dropped", "dropped_rate"])
 
 
-with open("./webtext2019zh/web_text_zh_train_sample.json", "r") as f:
-    content = f.readlines()
-
-data = map(json.loads, content)
-data = pd.DataFrame(data)
-
-text = "\n".join(data.content.values)
-references = cut_sentences(text)
-
-import logging
-logger = logging.getLogger()
-handler = logging.StreamHandler()
-formatter = logging.Formatter('%(asctime)s %(levelname)-8s %(message)s')
-handler.setFormatter(formatter)
-logger.addHandler(handler)
-logger.setLevel(logging.INFO)
-
-
 def make_candidates(references):
     """
     30% with mask filling rule1: scored by masked_rate
     30% with mask filling rule2: scored by masked_rate
     30% with back translation and word dropping: scored by dropped rate
     10% with back translation: score 0.98
-    
+
     Returns
     -------
     candidates: Generated candidates with the same length of references
@@ -199,7 +188,7 @@ def make_candidates(references):
     references = references.copy()
     random.shuffle(references)
     refs = []
-    
+
     ref_len = len(references)
 
     # Apply mask filling
@@ -220,10 +209,11 @@ def make_candidates(references):
 
     candidates = mf_filled.tolist()
     scores += (1 - mf.masked_rate).values.tolist()
-    
+
     # Back translation (bt)
     logger.info("Apply back translation ...")
-    bt = parallelize(references, lambda refs: BackTranslation().back_translation(refs))
+    bt = parallelize(
+        references, lambda refs: BackTranslation().back_translation(refs))
     # Drop samples where refs and back translationed excactly same
     df_bt = pd.DataFrame({
         "refs": references,
@@ -236,14 +226,14 @@ def make_candidates(references):
     refs += df_bt.refs.tolist()
     references = df_bt.refs.tolist()
     bt = df_bt.bt.tolist()
-    
+
     # Apply 30% with word dropping
     wd_len = int(df_bt.shape[0] * 0.75)
     bt_dropped = map(word_dropping, bt[:wd_len])
     bt_dropped = pd.DataFrame(bt_dropped)
     candidates += bt_dropped.dropped.tolist()
     scores += (1 - bt_dropped.dropped_rate).tolist()
-    
+
     del bt[:wd_len]
     candidates += bt
     scores += [0.98] * len(bt)
@@ -251,14 +241,89 @@ def make_candidates(references):
     return refs, candidates, scores
 
 
-[refs, candidates, scores] = make_candidates(references)
+def save_data(dataset):
+    """
+    Save data to csv and jsonl
+    jsonl example: {"candidate":"吴承恩是著名文学家","reference":"吴承恩是著名文学家","score":1}
+    """
+    csv_file = "./data_generationed/dataset.csv"
+    jsonl_file = "./data_generationed/dataset.jsonl"
 
-dataset = pd.DataFrame({
-    "reference": refs,
-    "candidate": candidates,
-    "score": scores
-})
+    mode = "w"
+    if path.exists(csv_file):
+        mode = "a"
 
-filename = "./data_generationed/dataset.csv"
-logger.info("Write to file {}".format(filename))
-dataset.to_csv(filename, index=None)
+    logger.info("Write to file {}".format(csv_file))
+    dataset.to_csv(csv_file, index=None, header=None, mode=mode)
+
+    def write_row(f, row):
+        f.write(row.to_json(force_ascii=False) + "\n")
+
+    logger.info("Write to file {}".format(jsonl_file))
+    with open(jsonl_file, mode) as f:
+        dataset.apply(lambda row: write_row(f, row), axis=1)
+
+
+def readfile(filename, checkpoint = 0, batch_size = 300):
+    content = []
+    i = 0
+    with open(filename, "r") as f:
+        while True:
+            i += 1
+            if i > checkpoint and i <= (checkpoint + batch_size):
+                line = f.readline()
+                if line != "":
+                    content.append(line)
+                else:
+                    checkpoint = None
+                    break
+            elif i <= checkpoint:
+                next(f)
+            else:
+                checkpoint = i - 1
+                break
+    return content, checkpoint
+
+def save_checkpoint(checkpoint):
+    with open("./data_generationed/checkpoint", "w") as f:
+        f.write("{}".format(checkpoint))
+
+def run_epoch(filename, checkpoint = 0, batch_size = 1e4):
+    logger.info("Loading dataset from checkpoint: {}".format(checkpoint))
+    [content, checkpoint] = readfile(filename,
+                                     checkpoint = checkpoint, 
+                                     batch_size = batch_size)
+    
+    data = map(json.loads, content)
+    data = pd.DataFrame(data)
+
+    text = "\n".join(data.content.values)
+    references = cut_sentences(text)
+    logger.info("References count: {}".format(len(references)))
+
+    [refs, candidates, scores] = make_candidates(references)
+
+    dataset = pd.DataFrame({
+        "reference": refs,
+        "candidate": candidates,
+        "score": scores
+    })
+
+    save_data(dataset)
+    save_checkpoint(checkpoint)
+    return checkpoint
+
+
+def main():
+    checkpoint = 0
+    while True:
+        checkpoint = run_epoch("./webtext2019zh/web_text_zh_train.json",
+                               checkpoint = checkpoint,
+                               batch_size = 1e4)
+        if checkpoint is None:
+            break
+    logger.info("Finish")
+
+
+if __name__ == "__main__":
+    main()
