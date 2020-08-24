@@ -7,6 +7,6 @@ python3 -m bleurt.finetune \
   -bert_config_file=${BERT_DIR}/bert_config.json \
   -vocab_file=${BERT_DIR}/vocab.txt \
   -model_dir=my_new_bleurt_checkpoint \
-  -train_set=bleurt/test_data/ratings_train.jsonl \
-  -dev_set=bleurt/test_data/ratings_dev.jsonl \
-  -num_train_steps=500
+  -train_set=pretrain/data_generationed/ratings_train.jsonl \
+  -dev_set=pretrain/data_generationed/ratings_dev.jsonl \
+  -num_train_steps=500000
