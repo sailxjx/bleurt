@@ -86,13 +86,25 @@ def mask_replacing2(s):
     return pd.Series([s, length / seq_len], index=["masked", "masked_rate"])
 
 
-def mask_filling(input_texts):
-    encoded_input = tokenizer(input_texts, padding=True, return_tensors='tf')
-    [predictions] = model(encoded_input)
-    predicted_index = tf.argmax(predictions, axis=2)
-    predicted_tokens = [tokenizer.convert_ids_to_tokens(index) for index in predicted_index]
-    filled_seqs = ["".join(predict_token[1:np.sum(mask)-1]) \
-        for [predict_token, mask] in zip(predicted_tokens, encoded_input["attention_mask"])]
+def mask_filling(input_texts, batch_size = 16):
+#     input_texts = ["我对自[MASK][MASK]能为力"]
+    if len(input_texts) < batch_size:
+        input_texts = [input_texts]
+    else:
+        # Break input texts into chunks of batch_size
+        # to avoid OOM
+        n = batch_size
+        input_texts = [input_texts[i * n:(i + 1) * n] \
+                       for i in range((len(input_texts) + n - 1) // n )]
+    
+    filled_seqs = []
+    for chunk_texts in input_texts:
+        encoded_input = tokenizer(chunk_texts, padding=True, return_tensors='tf')
+        [predictions] = model(encoded_input)
+        predicted_index = tf.argmax(predictions, axis=2)
+        predicted_tokens = [tokenizer.convert_ids_to_tokens(index) for index in predicted_index]
+        filled_seqs += ["".join(predict_token[1:np.sum(mask)-1]) \
+                       for [predict_token, mask] in zip(predicted_tokens, encoded_input["attention_mask"])]
     return filled_seqs
 
 class BackTranslation:
@@ -206,7 +218,7 @@ def make_candidates(references):
     refs += references[:mf2_len]
     del references[:mf2_len]
     mf = pd.DataFrame(list(mf1) + list(mf2))
-    candidates += mask_filling(mf.masked.tolist())
+    candidates += mask_filling(mf.masked.tolist(), batch_size = 16)
     scores += (1 - mf.masked_rate).values.tolist()
 
     # Back translation (bt)
@@ -251,8 +263,8 @@ def save_data(dataset):
     Save data to csv and jsonl
     jsonl example: {"candidate":"吴承恩是著名文学家","reference":"吴承恩是著名文学家","score":1}
     """
-    csv_file = "./data_generationed/dataset.csv"
-    jsonl_file = "./data_generationed/dataset.jsonl"
+    csv_file = "./data_generated/dataset.csv"
+    jsonl_file = "./data_generated/dataset.jsonl"
 
     mode = "w"
     if path.exists(csv_file):
@@ -290,7 +302,7 @@ def readfile(filename, checkpoint = 0, batch_size = 300):
     return content, checkpoint
 
 def save_checkpoint(checkpoint):
-    with open("./data_generationed/checkpoint", "w") as f:
+    with open("./data_generated/checkpoint", "w") as f:
         f.write("{}".format(checkpoint))
 
 def run_epoch(filename, checkpoint = 0, batch_size = 1e4):
@@ -298,7 +310,9 @@ def run_epoch(filename, checkpoint = 0, batch_size = 1e4):
     [content, checkpoint] = readfile(filename,
                                      checkpoint = checkpoint, 
                                      batch_size = batch_size)
-    
+    if len(content) == 0:
+        return None
+
     data = map(json.loads, content)
     data = pd.DataFrame(data)
 
@@ -320,7 +334,7 @@ def run_epoch(filename, checkpoint = 0, batch_size = 1e4):
 
 
 def main():
-    checkpoint = 0
+    checkpoint = 579400
     while True:
         checkpoint = run_epoch("./webtext2019zh/web_text_zh_train.json",
                                checkpoint = checkpoint,
