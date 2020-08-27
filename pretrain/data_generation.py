@@ -86,14 +86,14 @@ def mask_replacing2(s):
     return pd.Series([s, length / seq_len], index=["masked", "masked_rate"])
 
 
-def mask_filling(text):
-    encoded_input = tokenizer(text, return_tensors='tf')
+def mask_filling(input_texts):
+    encoded_input = tokenizer(input_texts, padding=True, return_tensors='tf')
     [predictions] = model(encoded_input)
-
-    predicted_index = tf.argmax(predictions[0], axis=1)
-    predicted_token = tokenizer.convert_ids_to_tokens(predicted_index)
-    return "".join(predicted_token[1:-1])
-
+    predicted_index = tf.argmax(predictions, axis=2)
+    predicted_tokens = [tokenizer.convert_ids_to_tokens(index) for index in predicted_index]
+    filled_seqs = ["".join(predict_token[1:np.sum(mask)-1]) \
+        for [predict_token, mask] in zip(predicted_tokens, encoded_input["attention_mask"])]
+    return filled_seqs
 
 class BackTranslation:
     def __init__(self):
@@ -206,9 +206,7 @@ def make_candidates(references):
     refs += references[:mf2_len]
     del references[:mf2_len]
     mf = pd.DataFrame(list(mf1) + list(mf2))
-    mf_filled = mf.masked.apply(mask_filling)
-
-    candidates = mf_filled.tolist()
+    candidates += mask_filling(mf.masked.tolist())
     scores += (1 - mf.masked_rate).values.tolist()
 
     # Back translation (bt)
